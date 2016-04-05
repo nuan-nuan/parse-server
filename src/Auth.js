@@ -114,30 +114,20 @@ Auth.prototype._loadRoles = function() {
       this.rolePromise = null;
       return Promise.resolve(this.userRoles);
     }
-
-    var roleIDs = results.map(r => r.objectId);
-    var promises = [Promise.resolve(roleIDs)];
+    var rolesMap =  results.reduce((m, r) => {
+      m.names.push(r.name);
+      m.ids.push(r.objectId);
+      return m;
+    }, {ids: [], names: []});
+    // Mount the initially queried roles
     var queriedRoles = {};
-    for (var role of roleIDs) {
-      promises.push(this._getAllRoleNamesForId(role, queriedRoles));
-    }
-    return Promise.all(promises).then((results) => {
-      var allIDs = [];
-      for (var x of results) {
-        Array.prototype.push.apply(allIDs, x);
-      }
-      var restWhere = {
-        objectId: {
-          '$in': allIDs
-        }
-      };
-      var query = new RestQuery(this.config, master(this.config),
-                                '_Role', restWhere, {});
-      return query.execute();
-    }).then((response) => {
-      var results = response.results;
-      this.userRoles = results.map((r) => {
-        return 'role:' + r.name;
+
+    // run the recursive finding
+    var roleIDs = rolesMap.ids;
+    return this._getAllRolesNamesForRoleIds(roleIDs, rolesMap.names, queriedRoles)
+    .then((roleNames) => {
+      this.userRoles = roleNames.map((r) => {
+        return 'role:' + r;
       });
       this.fetchedRoles = true;
       this.rolePromise = null;
@@ -146,50 +136,54 @@ Auth.prototype._loadRoles = function() {
   });
 };
 
-// Given a role object id, get any other roles it is part of
-Auth.prototype._getAllRoleNamesForId = function(roleID, queriedRoles = {}) {
-  // Don't need to requery this role as it is already being queried for.
-  if (queriedRoles[roleID] != null) {
-      return Promise.resolve([]);
-  }
-  queriedRoles[roleID] = true;
-  // As per documentation, a Role inherits AnotherRole
-  // if this Role is in the roles pointer of this AnotherRole
-  // Let's find all the roles where this role is in a roles relation
-  var rolePointer = {
+function parentRolesWhere(roleID) {
+  let rolePointer = {
     __type: 'Pointer',
     className: '_Role',
     objectId: roleID
   };
-  var restWhere = {
+  return {
     'roles': rolePointer
   };
-  var query = new RestQuery(this.config, master(this.config), '_Role',
-                            restWhere, {});
+}
+
+// Given a list of roleIds, find all the parent roles, returns a promise with all names
+Auth.prototype._getAllRolesNamesForRoleIds = function(roleIDs, names = [], queriedRoles = {}) {
+  let wheres = roleIDs.filter((roleID) => {
+    return queriedRoles[roleID] !== true;
+  }).map((roleID) => {
+    // mark as queried
+    queriedRoles[roleID] = true;
+    return parentRolesWhere(roleID);
+  });
+
+  // all roles are accounted for, return the names
+  if (wheres.length == 0) {
+    return Promise.resolve([...new Set(names)]);
+  }
+  // Build an OR query across all parentRoles
+  let restWhere = {'$or': wheres};
+  let query = new RestQuery(this.config, master(this.config), '_Role', restWhere, {});
   return query.execute().then((response) => {
     var results = response.results;
+    // Nothing found
     if (!results.length) {
-      return Promise.resolve([]);
+      return Promise.resolve(names);
     }
-    var roleIDs = results.map(r => r.objectId);
-
-    // we found a list of roles where the roleID
-    // is referenced in the roles relation,
-    // Get the roles where those found roles are also
-    // referenced the same way
-    var parentRolesPromises = roleIDs.map( (roleId) => {
-      return this._getAllRoleNamesForId(roleId, queriedRoles);
-    });
-    parentRolesPromises.push(Promise.resolve(roleIDs));
-    return Promise.all(parentRolesPromises);
-  }).then(function(results){
-    // Flatten
-    let roleIDs = results.reduce( (memo, result) => {
-      return memo.concat(result);
-    }, []);
-    return Promise.resolve([...new Set(roleIDs)]);
-  });
-};
+    // Map the results with all Ids and names
+    let resultMap = results.reduce((memo, role) => {
+      memo.names.push(role.name);
+      memo.ids.push(role.objectId);
+      return memo;
+    }, {ids: [], names: []});
+    // store the new found names
+    names = names.concat(resultMap.names);
+    // find the next ones, circular roles will be cut
+    return this._getAllRolesNamesForRoleIds(resultMap.ids, names, queriedRoles)
+  }).then((names) => {
+    return Promise.resolve([...new Set(names)])
+  })
+}
 
 module.exports = {
   Auth: Auth,
