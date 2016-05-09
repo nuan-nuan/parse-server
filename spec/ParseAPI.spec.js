@@ -39,8 +39,8 @@ describe('miscellaneous', function() {
       expect(data.get('password')).toBeUndefined();
       done();
     }, function(err) {
-      console.log(err);
       fail(err);
+      done();
     });
   });
 
@@ -1271,4 +1271,104 @@ describe('miscellaneous', function() {
     });
   });
 
+  it('gets relation fields', (done) => {
+    let object = new Parse.Object('AnObject');
+    let relatedObject = new Parse.Object('RelatedObject');
+    Parse.Object.saveAll([object, relatedObject]).then(() => {
+      object.relation('related').add(relatedObject);
+      return object.save();
+    }).then(() => {
+      let headers = {
+        'Content-Type': 'application/json',
+        'X-Parse-Application-Id': 'test',
+        'X-Parse-REST-API-Key': 'rest'
+      };
+      let requestOptions = {
+        headers: headers,
+        url: 'http://localhost:8378/1/classes/AnObject',
+        json: true
+      };
+      request.get(requestOptions, (err, res, body) => {
+        expect(body.results.length).toBe(1);
+        let result = body.results[0];
+        expect(result.related).toEqual({
+          __type: "Relation",
+          className: 'RelatedObject'
+        })
+        done();
+      });
+    })
+  });
+
+  it('properly returns incremented values (#1554)', (done) => {
+      let headers = {
+        'Content-Type': 'application/json',
+        'X-Parse-Application-Id': 'test',
+        'X-Parse-REST-API-Key': 'rest'
+      };
+      let requestOptions = {
+        headers: headers,
+        url: 'http://localhost:8378/1/classes/AnObject',
+        json: true
+      };
+     let object = new Parse.Object('AnObject');;
+
+     function runIncrement(amount) {
+       let options = Object.assign({}, requestOptions, {
+         body: {
+           "key": {
+            __op: 'Increment',
+            amount: amount
+           }
+          },
+         url: 'http://localhost:8378/1/classes/AnObject/'+object.id
+       })
+       return new Promise((resolve, reject) => {
+         request.put(options, (err, res, body)  => {
+           if (err) {
+             reject(err);
+           } else {
+             resolve(body);
+           }
+         });
+       })
+     }
+
+     object.save().then(() => {
+       return runIncrement(1);
+     }).then((res) => {
+       expect(res.key).toBe(1);
+       return runIncrement(-1);
+     }).then((res) => {
+       expect(res.key).toBe(0);
+       done();
+     })
+  })
+
+  it('ignores _RevocableSession "header" send by JS SDK', (done) => {
+    let object = new Parse.Object('AnObject');
+    object.set('a', 'b');
+    object.save().then(() => {
+      request.post({
+        headers: {'Content-Type': 'application/json'},
+        url: 'http://localhost:8378/1/classes/AnObject',
+        body: {
+          _method: 'GET',
+          _ApplicationId: 'test',
+          _JavaScriptKey: 'test',
+          _ClientVersion: 'js1.8.3',
+          _InstallationId: 'iid',
+          _RevocableSession: "1",
+        },
+        json: true
+      }, (err, res, body) => {
+        expect(body.error).toBeUndefined();
+        expect(body.results).not.toBeUndefined();
+        expect(body.results.length).toBe(1);
+        let result = body.results[0];
+        expect(result.a).toBe('b');
+        done();
+      })
+    });
+  });
 });
